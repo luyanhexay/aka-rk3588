@@ -20,8 +20,8 @@ else()
   add_definitions(-DCURRENT_LOG_LEVEL=1)
 endif()
 
-# ── yolov8 tree: 3rdparty sets LIBRKNNRT, LIBRKNNRT_INCLUDES, LIBJPEG_INCLUDES ─
-set(YOLOV8_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../yolov8)
+# ── 3rd: self-contained dependency tree (no ../yolov8 needed) ─────────────────
+set(3RD ${CMAKE_CURRENT_SOURCE_DIR}/3rd)
 
 if(NOT DEFINED TARGET_SOC)
   set(TARGET_SOC rk3588)
@@ -32,46 +32,44 @@ option(NATIVE_BUILD "Build natively on the board using system libraries" OFF)
 
 # ── RKNN YOLOv8 sources (rknpu2 for rk3588) ──────────────────────────────────
 set(RKNPU2_SRC
-    ${YOLOV8_ROOT}/examples/yolov8/cpp/postprocess.cc
-    ${YOLOV8_ROOT}/examples/yolov8/cpp/rknpu2/yolov8.cc
+    ${3RD}/yolov8_src/postprocess.cc
+    ${3RD}/yolov8_src/rknpu2/yolov8.cc
 )
+
+# ── Common 3rd paths ──────────────────────────────────────────────────────────
+set(RKNNRT_DIR         ${3RD}/rknpu2)
+set(LIBRKNNRT          ${RKNNRT_DIR}/Linux/aarch64/librknnrt.so)
+set(LIBRKNNRT_INCLUDES ${RKNNRT_DIR}/include)
+
+set(STB_INCLUDES        ${3RD}/stb_image)
+set(LIBRGA_INCLUDES     ${3RD}/librga/include)
+
+# tennis.rknn is a single-class model (tennis ball only): output=[1,5,N]
+add_definitions(-DOBJ_CLASS_NUM=1)
+add_definitions(-DDISABLE_RGA)
 
 if(NATIVE_BUILD)
   # ── Board native build ─────────────────────────────────────────────────────
+  # librknnrt is already installed on the board; link dynamically, no .so in repo.
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(LIBUVC  REQUIRED libuvc)
-  pkg_check_modules(LIBUSB  REQUIRED libusb-1.0)
-  pkg_check_modules(LIBJPEG REQUIRED libturbojpeg)
+  pkg_check_modules(LIBUVC    REQUIRED libuvc)
+  pkg_check_modules(LIBUSB    REQUIRED libusb-1.0)
+  pkg_check_modules(LIBJPEG   REQUIRED libturbojpeg)
+  pkg_check_modules(LIBSNDFILE REQUIRED sndfile)
 
-  # librknnrt shipped in 3rdparty tree
-  set(RKNNRT_DIR         ${YOLOV8_ROOT}/3rdparty/rknpu2)
-  set(LIBRKNNRT          ${RKNNRT_DIR}/Linux/aarch64/librknnrt.so)
-  set(LIBRKNNRT_INCLUDES ${RKNNRT_DIR}/include)
-
-  # utils/CMakeLists.txt needs these vars before add_subdirectory
-  set(STB_INCLUDES        ${YOLOV8_ROOT}/3rdparty/stb_image)
   set(LIBJPEG_INCLUDES    ${LIBJPEG_INCLUDE_DIRS})
   set(LIBJPEG             ${LIBJPEG_LIBRARIES})
-  set(LIBRGA              "")   # no RGA .so needed → CPU fallback
-  set(LIBRGA_INCLUDES     ${YOLOV8_ROOT}/3rdparty/librga/include)  # headers still needed for im2d.h
-  add_definitions(-DDISABLE_RGA)
-
-  # tennis.rknn is a single-class model (tennis ball only): output=[1,5,N]
-  # Override the default COCO 80-class value so postprocess parses correctly.
-  add_definitions(-DOBJ_CLASS_NUM=1)
-
-  # libsndfile: needed by audio_utils.c header inclusion
-  pkg_check_modules(LIBSNDFILE REQUIRED sndfile)
+  set(LIBRGA              "")
   set(LIBSNDFILE          ${LIBSNDFILE_LIBRARIES})
   set(LIBSNDFILE_INCLUDES ${LIBSNDFILE_INCLUDE_DIRS})
 
-  add_subdirectory(${YOLOV8_ROOT}/utils utils.out)
+  add_subdirectory(${3RD}/utils utils.out)
 
   include_directories(
       ${CMAKE_CURRENT_SOURCE_DIR}
       ${LIBRKNNRT_INCLUDES}
-      ${YOLOV8_ROOT}/examples/yolov8/cpp
-      ${YOLOV8_ROOT}/utils
+      ${3RD}/yolov8_src
+      ${3RD}/utils
       ${LIBUVC_INCLUDE_DIRS}
       ${LIBUSB_INCLUDE_DIRS}
       ${LIBJPEG_INCLUDE_DIRS}
@@ -85,6 +83,7 @@ if(NATIVE_BUILD)
       ${RKNPU2_SRC}
   )
 
+  # Use the bundled librknnrt.so (newer than what's installed on the board)
   target_link_libraries(tennis
       imageutils fileutils imagedrawing
       ${LIBRKNNRT}
@@ -94,20 +93,30 @@ if(NATIVE_BUILD)
       -lpthread -ldl -lm
   )
 
+  # Set RPATH so the binary finds the bundled librknnrt.so at runtime.
+  # Deploy the .so alongside the binary (e.g. same directory or ../lib/).
+  set_target_properties(tennis PROPERTIES
+      BUILD_RPATH   "${RKNNRT_DIR}/Linux/aarch64"
+      INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib"
+  )
+
 else()
   # ── Cross-compile on PC ────────────────────────────────────────────────────
-  add_subdirectory(${YOLOV8_ROOT}/3rdparty 3rdparty.out)
-  add_subdirectory(${YOLOV8_ROOT}/utils    utils.out)
+  set(LIBJPEG_DIR       ${3RD}/jpeg_turbo)
+  set(LIBJPEG_INCLUDES  ${LIBJPEG_DIR}/include)
+  set(LIBJPEG           ${LIBJPEG_DIR}/Linux/aarch64/libturbojpeg.a)
+  set(LIBRGA            ${3RD}/librga/Linux/aarch64/librga.so)
+  set(LIBSNDFILE        "")
+  set(LIBSNDFILE_INCLUDES "")
 
-  set(LIBJPEG_DIR ${YOLOV8_ROOT}/3rdparty/jpeg_turbo)
+  add_subdirectory(${3RD}/utils utils.out)
 
   include_directories(
       ${CMAKE_CURRENT_SOURCE_DIR}
       ${LIBRKNNRT_INCLUDES}
-      ${YOLOV8_ROOT}/examples/yolov8/cpp
-      ${YOLOV8_ROOT}/utils
+      ${3RD}/yolov8_src
+      ${3RD}/utils
       ${LIBJPEG_DIR}/include
-      ${YOLOV8_ROOT}/3rdparty/libuvc/include
       /usr/include   # fallback for libuvc/libuvc.h
   )
 

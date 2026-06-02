@@ -12,7 +12,6 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-YOLOV8_ROOT="${SCRIPT_DIR}/../yolov8"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 BUILD_TYPE=Release
