@@ -161,6 +161,7 @@ static void usage(const char* prog) {
     LOGI("  %s test-uvc   [uvc_index]               -- capture one frame -> capture.jpg", prog);
     LOGI("  %s test-yolo  <model.rknn> [uvc_index]  -- detect one frame  -> result.jpg", prog);
     LOGI("  %s test-motor [uart_dev] [speed=N]       -- motor test", prog);
+    LOGI("  %s test-arm   [uart_dev] <cmd|a0 a1 a2>  -- arm servo test (default /dev/ttyUSB1)", prog);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -180,6 +181,10 @@ int main(int argc, char** argv)
     if (strcmp(argv[1], "test-motor") == 0) {
         const char* dev = (argc >= 3) ? argv[2] : "/dev/ttyUSB0";
         return cmd_test_motor(dev, argc, argv);
+    }
+    if (strcmp(argv[1], "test-arm") == 0) {
+        const char* dev = (argc >= 3) ? argv[2] : "/dev/ttyUSB1";
+        return cmd_test_arm(dev, argc, argv);
     }
 
     const char* model_path = argv[1];

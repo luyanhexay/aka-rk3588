@@ -1,4 +1,4 @@
-// test_cmds.cpp — debug sub-commands (test-uvc / test-yolo / test-motor)
+// test_cmds.cpp — debug sub-commands (test-uvc / test-yolo / test-motor / test-arm)
 #include "test_cmds.hpp"
 
 #include <stdio.h>
@@ -15,6 +15,7 @@
 #include "capture/uvc_capture.hpp"
 #include "detect/detect.hpp"
 #include "motor/motor.hpp"
+#include "arm/arm.hpp"
 
 static const int FRAME_WIDTH  = 640;
 static const int FRAME_HEIGHT = 480;
@@ -211,3 +212,99 @@ int cmd_test_motor(const char* uart_dev, int argc, char** argv)
     printf("\n=== test-motor DONE ===\n");
     return 0;
 }
+
+// ── cmd_test_arm ──────────────────────────────────────────────────────────────
+// Usage:
+//   tennis test-arm [dev]                     -- show help
+//   tennis test-arm [dev] grab                -- grab sequence
+//   tennis test-arm [dev] release             -- release gripper
+//   tennis test-arm [dev] show                -- lift and show
+//   tennis test-arm [dev] pos                 -- move to home/ready
+//   tennis test-arm [dev] demo                -- pos->grab->show->release
+//   tennis test-arm [dev] <a0> <a1> <a2>      -- set 3 servo angles (0~270)
+//   tennis test-arm [dev] set <id> <angle>    -- set single servo angle
+int cmd_test_arm(const char* uart_dev, int argc, char** argv)
+{
+    // argv layout: argv[0]=tennis argv[1]="test-arm" argv[2]=dev_or_cmd ...
+    // uart_dev is already resolved by main; remaining args start at argv[3]
+    printf("=== test-arm  dev=%s ===\n", uart_dev);
+
+    Arm arm(uart_dev, 115200);
+
+    // Collect sub-args: everything after argv[2] (the dev)
+    int sub_argc = argc - 3;   // args after <dev>
+    char** sub = argv + 3;
+
+    if (sub_argc == 0) {
+        printf(
+            "Usage:\n"
+            "  tennis test-arm [dev] grab\n"
+            "  tennis test-arm [dev] release\n"
+            "  tennis test-arm [dev] show\n"
+            "  tennis test-arm [dev] pos\n"
+            "  tennis test-arm [dev] demo\n"
+            "  tennis test-arm [dev] <a0> <a1> <a2>   (set 3 servo angles 0~270)\n"
+            "  tennis test-arm [dev] set <id> <angle>  (set single servo)\n"
+        );
+        return 0;
+    }
+
+    const char* cmd = sub[0];
+
+    if (strcmp(cmd, "grab") == 0) {
+        printf("Executing grab sequence...\n"); fflush(stdout);
+        arm.grab();
+        printf("Done.\n");
+        return 0;
+    }
+    if (strcmp(cmd, "release") == 0) {
+        printf("Releasing gripper...\n"); fflush(stdout);
+        arm.release();
+        printf("Done.\n");
+        return 0;
+    }
+    if (strcmp(cmd, "show") == 0) {
+        printf("Showing ball...\n"); fflush(stdout);
+        arm.show();
+        printf("Done.\n");
+        return 0;
+    }
+    if (strcmp(cmd, "pos") == 0) {
+        printf("Moving to home/ready position...\n"); fflush(stdout);
+        arm.grab_pos();
+        printf("Done.\n");
+        return 0;
+    }
+    if (strcmp(cmd, "demo") == 0) {
+        printf("Demo: pos -> grab -> show -> release\n"); fflush(stdout);
+        arm.grab_pos();  usleep(1500000);
+        arm.grab();      usleep(2000000);
+        arm.show();      usleep(2000000);
+        arm.release();
+        printf("Demo done.\n");
+        return 0;
+    }
+    if (strcmp(cmd, "set") == 0 && sub_argc == 3) {
+        int   id    = atoi(sub[1]);
+        float angle = atof(sub[2]);
+        printf("servo %d -> %.1f deg\n", id, angle); fflush(stdout);
+        arm.set_angle(id, angle);
+        usleep(1500000);  // 等待舵机到位
+        return 0;
+    }
+    if (sub_argc == 3) {
+        float a0 = atof(sub[0]);
+        float a1 = atof(sub[1]);
+        float a2 = atof(sub[2]);
+        printf("servo 0=%.0f  1=%.0f  2=%.0f\n", a0, a1, a2); fflush(stdout);
+        arm.set_angle(0, a0);
+        arm.set_angle(1, a1);
+        arm.set_angle(2, a2);
+        usleep(1500000);  // 等待舵机到位
+        return 0;
+    }
+
+    printf("Unknown arm command: %s\n", cmd);
+    return 1;
+}
+
