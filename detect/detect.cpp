@@ -216,14 +216,14 @@ int detect_run(rknn_app_context_t* ctx,
     if (t_post)   *t_post   = t_post_us;
 
     // Print timing breakdown - always print for debugging
-    printf("[detect] total=%.1fms  in=%.1f run=%.1f out=%.1f post=%.1f rel=%.1f  cands=%d nms=%d\n",
-            t_total / 1000.0f,
-            t_input_us / 1000.0f,
-            t_run_us / 1000.0f,
-            t_output_us / 1000.0f,
-            t_post_us / 1000.0f,
-            t_release / 1000.0f,
-            (int)cands.size(), (int)dets.size());
+    // printf("[detect] total=%.1fms  in=%.1f run=%.1f out=%.1f post=%.1f rel=%.1f  cands=%d nms=%d\n",
+    //         t_total / 1000.0f,
+    //         t_input_us / 1000.0f,
+    //         t_run_us / 1000.0f,
+    //         t_output_us / 1000.0f,
+    //         t_post_us / 1000.0f,
+    //         t_release / 1000.0f,
+    //         (int)cands.size(), (int)dets.size());
     fflush(stdout);
 
     return (int)dets.size();

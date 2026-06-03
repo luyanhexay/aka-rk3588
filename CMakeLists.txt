@@ -77,6 +77,7 @@ if(NATIVE_BUILD)
 
   add_executable(tennis
       tennis.cpp
+      test_cmds.cpp
       motor/motor.cpp motor/pwm_motor_driver.cpp motor/uart_motor_driver.cpp
       capture/uvc_capture.cpp
       detect/detect.cpp
@@ -122,6 +123,7 @@ else()
 
   add_executable(tennis
       tennis.cpp
+      test_cmds.cpp
       motor/motor.cpp motor/pwm_motor_driver.cpp motor/uart_motor_driver.cpp
       capture/uvc_capture.cpp
       detect/detect.cpp
