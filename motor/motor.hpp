@@ -31,13 +31,17 @@ public:
     void brake();
     void standby();
 
-    // Author: Zhihang Shao <dio_ro@outlook.com>
-    // Source: aka0-ref commits 755a885, 9c69f3f
     // 差速驱动：正值前进，负值后退，范围 [-100, 100]
+    // 非零值会被映射到 [min_speed_, 100]，避免低于死区转不动
     void drive(int left_speed, int right_speed);
+
+    // 设置最小可动速度（默认15），低于此值的非零指令会被拉到该值
+    void set_min_speed(int min_speed) { min_speed_ = min_speed; }
+    int  get_min_speed() const        { return min_speed_; }
 
 private:
     std::unique_ptr<MotorDriver> driver_;
+    int min_speed_ = 15;  // 最小可动速度，低于此值电机可能转不动
 };
 
 #endif // MOTOR_HPP

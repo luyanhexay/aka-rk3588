@@ -26,6 +26,7 @@
 #include "capture/uvc_capture.hpp"
 #include "detect/detect.hpp"
 #include "test_cmds.hpp"
+#include "arm/arm.hpp"
 
 // ── Build-time tunables ───────────────────────────────────────────────────────
 #define ENABLE_SAVE_IMAGE 0
@@ -43,37 +44,44 @@ static const int MODEL_H      = 640;
 //   right_speed = base_speed - bias
 // bias = K_TURN * (offset / half_width), clamped to [-MAX_TURN_BIAS, MAX_TURN_BIAS]
 // offset>0 (ball on right) → bias>0 → left faster → turn right
-static const int   CHASE_SPEED_FAR  = 40;   // was 60
-static const int   CHASE_SPEED_NEAR = 14;   // was 22
+static const int   CHASE_SPEED_FAR  = 40;   // 语义速度(1~100)，Motor 层映射到实际PWM
+static const int   CHASE_SPEED_NEAR = 3;   // 接近时速度
 
 static const float AREA_FAR         = 0.02f;
 static const float AREA_NEAR        = 0.35f;
 static const float AREA_BRAKE       = 0.20f;  // 进入制动区（提前减速）
 
-static const int   BRAKE_SPEED      = 14;     // 制动区速度
+static const int   BRAKE_SPEED      = 3;     // 制动区速度（语义）
 static const float AREA_STOP        = 0.28f;  // 触发停止
 static const float AREA_REVERSE     = 0.50f;  // 球太近 → 后退
-static const int   REVERSE_SPEED    = 20;     // 后退速度
+static const int   REVERSE_SPEED    = 15;     // 后退速度（语义）
 
 static const float AREA_STOP_EXIT   = 0.20f;  // 重新追球阈值
-static const int   STOP_CONFIRM_CNT = 4;      // 1帧立刻停
-static const int   BRAKE_PULSE_US   = 350000; // 持续制动 400ms
+static const int   STOP_CONFIRM_CNT = 4;      // 确认帧数
+static const int   BRAKE_PULSE_US   = 350000; // 持续制动 350ms
+static const int   STOP_CENTER_OFFSET = 90;   // px: 停止目标偏右（夹爪在右侧）
 
-static const float K_TURN              = 25.0f;  // 转向增益
-static const int   MAX_TURN_BIAS_FAR   = 20;     // 远距离: < CHASE_SPEED_FAR(35) → 纯差速
-static const int   MAX_TURN_BIAS_NEAR  = 50;     // 近距离: > BRAKE_SPEED(13) → 轴转
-static const int   CENTER_DEAD_ZONE    = 40;     // px: 追球死区
-static const int   STOP_CENTER_ZONE    = 20;     // px: 停止确认死区（更严格）
-static const int   ALIGN_PIVOT_SPD     = 35;     // 对准时轴转最大速度
-static const int   ALIGN_PIVOT_MIN     = 14;     // 对准时轴转最小速度（克服静摩擦）
+static const float K_TURN              = 25.0f;
+static const int   MAX_TURN_BIAS_FAR   = 5;     // 远距离差速偏置上限（语义）
+static const int   MAX_TURN_BIAS_NEAR  = 10;     // 近距离轴转上限（语义）
+static const int   CENTER_DEAD_ZONE    = 15;     // px: 追球死区
+static const int   STOP_CENTER_ZONE    = 5;     // px: 停止确认死区
+static const int   ALIGN_PIVOT_SPD     = 15;     // 对准轴转最大速度（语义）
+static const int   ALIGN_PIVOT_MIN     = 3;     // 对准轴转最小速度（语义，Motor层保证可动）
 
-static const int   SEARCH_FRAMES    = 15;     // 球消失后继续转向查找的帧数 (~0.75s @20fps)
-static const int   SEARCH_PIVOT_SPD = 22;     // 查找时轴转速度
+static const int   SEARCH_FRAMES    = 25;
+static const int   SEARCH_PIVOT_SPD = 10;     // 查找轴转速度（语义）
+
+static const int   ALIGN_STALL_FRAMES  = 20;    // 连续N帧偏移无变化 → 判定卡死
+static const int   ALIGN_STALL_MOVE_PX = 10;    // 变化小于此值视为未移动
+static const int   ALIGN_KICK_SPD      = 35;    // 卡死踢出速度（语义）
+static const int   ALIGN_KICK_US       = 180000;// 踢出持续时间 180ms
 
 // ── Globals for signal handler ────────────────────────────────────────────────
 static Motor*              g_motor      = nullptr;
 static UvcCapture*         g_capture    = nullptr;
 static rknn_app_context_t* g_rknn_ctx   = nullptr;
+static Arm*                g_arm        = nullptr;
 static int                 g_saved_stderr = -1;
 static int                 g_devnull    = -1;
 
@@ -156,8 +164,8 @@ static int base_speed(float area_ratio) {
 // ── Usage ─────────────────────────────────────────────────────────────────────
 static void usage(const char* prog) {
     LOGI("Usage:");
-    LOGI("  %s <model.rknn> [uart_dev] [uvc_device_index]", prog);
-    LOGI("  Example: %s tennis.rknn /dev/ttyS3 0", prog);
+    LOGI("  %s <model.rknn> [uart_dev] [uvc_device_index] [arm_dev]", prog);
+    LOGI("  Example: %s tennis.rknn /dev/ttyS3 0 /dev/ttyUSB1", prog);
     LOGI("  %s test-uvc   [uvc_index]               -- capture one frame -> capture.jpg", prog);
     LOGI("  %s test-yolo  <model.rknn> [uvc_index]  -- detect one frame  -> result.jpg", prog);
     LOGI("  %s test-motor [uart_dev] [speed=N]       -- motor test", prog);
@@ -190,13 +198,21 @@ int main(int argc, char** argv)
     const char* model_path = argv[1];
     const char* uart_dev   = (argc >= 3) ? argv[2] : "/dev/ttyS3";
     int         uvc_index  = (argc >= 4) ? atoi(argv[3]) : 0;
+    const char* arm_dev    = (argc >= 5) ? argv[4] : "/dev/ttyUSB1";
 
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
 
     Motor motor(MotorDriverType::UART, uart_dev);
     g_motor = &motor;
-    LOGI("Motor initialized (UART %s)", uart_dev);
+    // 最小可动速度，低于此值电机转不动。换车时通过 test-motor 测试后在此修改
+    motor.set_min_speed(15);
+    LOGI("Motor initialized (UART %s)  min_speed=%d", uart_dev, motor.get_min_speed());
+
+    Arm arm(arm_dev);
+    g_arm = &arm;
+    arm.grab_pos();  // 归位到初始姿势
+    LOGI("Arm initialized (%s)", arm_dev);
 
     UvcCapture capture;
     g_capture = &capture;
@@ -240,6 +256,14 @@ int main(int argc, char** argv)
     // ── Stop state ────────────────────────────────────────────────────────────
     bool stopped          = false;  // locked stop state
     int  stop_confirm_cnt = 0;      // consecutive frames meeting stop condition
+    int  align_cnt        = 0;      // frames spent in ALIGN (timeout → force grab)
+
+    // ── ALIGN stall detection ─────────────────────────────────────────────────
+    // 记录最近 ALIGN_STALL_FRAMES 帧的 offset，判断是否卡死
+    static const int STALL_BUF = 30;
+    int  align_off_buf[STALL_BUF] = {};
+    int  align_off_head = 0;
+    bool align_kicking  = false;    // 正在执行踢出脉冲
 
     // ── Chase loop ────────────────────────────────────────────────────────────
     while (true) {
@@ -344,9 +368,12 @@ int main(int argc, char** argv)
                 continue;
             }
 
-            // ── Stop condition: close enough AND centered, confirm N frames ───
-            if (area_ratio >= AREA_STOP && abs(offset) <= STOP_CENTER_ZONE) {
+            // ── Stop condition: close enough AND at target offset, confirm N frames ───
+            int stop_off = offset - STOP_CENTER_OFFSET;  // 目标：球在中心偏右
+            if (area_ratio >= AREA_STOP && abs(stop_off) <= STOP_CENTER_ZONE) {
                 stop_confirm_cnt++;
+                align_cnt = 0;
+                align_off_head = 0;
                 if (stop_confirm_cnt >= STOP_CONFIRM_CNT) {
                     dup2(g_saved_stderr, STDERR_FILENO);
                     printf("[STATE] BRAKING  area=%.3f off=%d  %dms...\n",
@@ -360,28 +387,68 @@ int main(int argc, char** argv)
                     motor.standby();
                     stopped = true;
                     dup2(g_saved_stderr, STDERR_FILENO);
-                    printf("[STATE] STOPPED  area=%.3f\n", area_ratio);
+                    printf("[STATE] STOPPED  area=%.3f  -> GRAB\n", area_ratio);
                     dup2(g_devnull, STDERR_FILENO);
+                    // ── 执行抓球 ──────────────────────────────────────────────
+                    if (g_arm) g_arm->grab();
                 } else {
                     motor.brake();
                 }
                 t_ctrl_acc += elapsed_us(t_stage);
                 continue;
-            } else if (area_ratio >= AREA_STOP && abs(offset) > STOP_CENTER_ZONE) {
-                // Close but not centered → proportional pivot to align (avoid oscillation)
+            } else if (area_ratio >= AREA_STOP && abs(stop_off) > STOP_CENTER_ZONE) {
+                // Close but not at target offset → proportional pivot to align
                 stop_confirm_cnt = 0;
-                float t = std::min(1.0f, (float)abs(offset) / (float)half_w);
+                align_cnt++;
+
+                // ── 卡死检测：记录 offset 历史，若近N帧无移动则踢出 ──────────
+                align_off_buf[align_off_head % STALL_BUF] = offset;
+                align_off_head++;
+                bool stalled = false;
+                if (align_cnt >= ALIGN_STALL_FRAMES) {
+                    int mn = align_off_buf[0], mx = align_off_buf[0];
+                    int check = std::min(align_cnt, STALL_BUF);
+                    for (int i = 1; i < check; i++) {
+                        int v = align_off_buf[i];
+                        if (v < mn) mn = v;
+                        if (v > mx) mx = v;
+                    }
+                    stalled = (mx - mn) < ALIGN_STALL_MOVE_PX;
+                }
+
+                if (stalled) {
+                    int kick = (stop_off > 0) ? ALIGN_KICK_SPD : -ALIGN_KICK_SPD;
+                    dup2(g_saved_stderr, STDERR_FILENO);
+                    printf("[STATE] ALIGN_KICK  area=%.3f off=%3d stop_off=%3d  kick=%d  %dms\n",
+                           area_ratio, offset, stop_off, kick, ALIGN_KICK_US/1000);
+                    dup2(g_devnull, STDERR_FILENO);
+                    struct timeval tk; gettimeofday(&tk, nullptr);
+                    while (elapsed_us(tk) < ALIGN_KICK_US) {
+                        motor.drive(kick, -kick);
+                        usleep(20000);
+                    }
+                    motor.brake();
+                    // 重置历史，避免连续踢
+                    align_off_head = 0;
+                    align_cnt = 0;
+                    t_ctrl_acc += elapsed_us(t_stage);
+                    continue;
+                }
+
+                float t = std::min(1.0f, (float)abs(stop_off) / (float)half_w);
                 int pivot_spd = (int)(ALIGN_PIVOT_MIN + t * (ALIGN_PIVOT_SPD - ALIGN_PIVOT_MIN));
-                int pivot = (offset > 0) ? pivot_spd : -pivot_spd;
+                int pivot = (stop_off > 0) ? pivot_spd : -pivot_spd;
                 motor.drive(pivot, -pivot);
                 dup2(g_saved_stderr, STDERR_FILENO);
-                printf("[STATE] ALIGN  area=%.3f off=%3d  pivot=%d\n",
-                       area_ratio, offset, pivot);
+                printf("[STATE] ALIGN  area=%.3f off=%3d stop_off=%3d  pivot=%d  [%d]\n",
+                       area_ratio, offset, stop_off, pivot, align_cnt);
                 dup2(g_devnull, STDERR_FILENO);
                 t_ctrl_acc += elapsed_us(t_stage);
                 continue;
             } else {
                 stop_confirm_cnt = 0;
+                align_cnt = 0;
+                align_off_head = 0;
             }
 
             // ── Chase ─────────────────────────────────────────────────────────
